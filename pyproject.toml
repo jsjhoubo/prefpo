@@ -63,6 +63,7 @@ packages = [
     "prefpo.data",
     "prefpo.grading",
     "prefpo.judges",
+    "prefpo.lattice",
 ]
 
 [tool.setuptools.package-dir]
