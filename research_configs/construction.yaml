@@ -1,0 +1,31 @@
+name: lattice-construction-local
+description: Reproducible offline construction smoke experiment; sample data is illustrative.
+seed: 42
+model:
+  name: openai/gpt-4o-mini
+construction:
+  iterations: 10
+  target_f1: 0.9
+  simulation:
+    turns: 3
+    personas:
+      - curious_first_time_user
+      - persistent_boundary_tester
+      - context_shifting_user
+    samples_per_example: 1
+    include_assistant_turns: true
+    random_seed: 42
+  minimum_rule_confidence: 0.55
+  consolidate_every_iteration: true
+  remove_unused_rules: true
+  allow_llm_rule_generation: false
+improvement:
+  iterations: 0
+dataset:
+  train_path: research_data/construction.jsonl
+  format: jsonl
+  seed: 42
+  validation_fraction: 0.25
+output_dir: results/lattice
+use_deterministic_evaluator: true
+use_offline_adapter: true

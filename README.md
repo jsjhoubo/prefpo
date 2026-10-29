@@ -576,3 +576,27 @@ If you use PrefPO in your research, please cite:
       url={https://arxiv.org/abs/2603.19311}, 
 }
 ```
+
+## Lattice-Inspired Guardrail Research
+
+PrefPO also contains a separate, optional research package for learning and
+improving conversation-safety policies. It reuses PrefPO's `ModelConfig`,
+`call_llm`, `Grader`, and `Sample` interfaces; policies themselves are
+versioned rule sets, not prompt-pool entries.
+
+The offline research examples require no API key or remote dataset download:
+
+```python
+import asyncio
+from prefpo.lattice import ExperimentConfig, LatticeExperiment, load_conversations
+
+config = ExperimentConfig.from_yaml("research_configs/construction.yaml")
+records = load_conversations("research_data/construction.jsonl")
+result = asyncio.run(LatticeExperiment(config).run(train=records))
+print(result.construction.best_report.overall.f1)
+```
+
+The sample conversations are synthetic fixtures for exercising the software;
+they are not ProsocialDialog data and do not reproduce the paper's reported
+benchmark results. Method details and the paper/reconstruction boundary are
+documented in [`docs/lattice-research.md`](docs/lattice-research.md).
