@@ -209,7 +209,14 @@ def _read_dataset_records(
             records = list(csv.DictReader(file))
     if limit is not None:
         records = records[:limit]
-    return records
+    # Row indices identify records only within their source file. Keep explicit
+    # IDs global, but namespace fallback IDs so independent files can be split.
+    return [
+        {**record, "conversation_id": f"{source.resolve().as_uri()}#row={index}"}
+        if isinstance(record, dict) and "conversation_id" not in record and "id" not in record
+        else record
+        for index, record in enumerate(records)
+    ]
 
 
 def split_conversations(

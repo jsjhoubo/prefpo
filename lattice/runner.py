@@ -240,7 +240,29 @@ class LatticeExperiment:
             test_set = list(test)
         else:
             test_set = []
+        _validate_dataset_partition_ids(
+            train=training,
+            validation=validation_set,
+            deployment=deployment_set,
+            test=test_set,
+        )
         return training, validation_set, deployment_set, test_set
+
+
+def _validate_dataset_partition_ids(
+    **partitions: Iterable[Conversation | LabeledConversation],
+) -> None:
+    seen: dict[str, str] = {}
+    for partition_name, records in partitions.items():
+        for record in records:
+            conversation_id = record.conversation_id
+            previous_partition = seen.get(conversation_id)
+            if previous_partition is not None:
+                raise ValueError(
+                    f"Conversation id {conversation_id!r} appears in both "
+                    f"{previous_partition} and {partition_name} datasets"
+                )
+            seen[conversation_id] = partition_name
 
 
 def run_experiment(

@@ -3,10 +3,11 @@
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from prefpo.config import ModelConfig, PrefPOConfig
-from prefpo.data.bbh import load_bbh
 from prefpo.grading import get_bbh_grader
 from prefpo.grading.base import GradeResult, Grader
 from prefpo.llm import client as llm_client
@@ -14,6 +15,36 @@ from prefpo.optimize import optimize_async
 from prefpo.pool import PromptPool
 from prefpo.prompts.discriminator import build_standalone_trajectory
 from prefpo.types import ModelOutput, Prompt, PromptRole, Sample
+
+
+@pytest.fixture
+def responses_api(monkeypatch):
+    """Stub only the provider transport, keeping PrefPO's LLM path real."""
+    async def respond(**kwargs):
+        response_format = kwargs["text"]["format"]
+        if response_format["type"] == "json_schema":
+            payloads = {
+                "ok_schema": {"ok": True},
+                "discriminator_output": {"preferred": 1, "feedback": "Clearer instruction"},
+                "optimizer_output": {"prompt": "Answer the question carefully."},
+            }
+            text = json.dumps(payloads[response_format["name"]])
+        else:
+            text = "ANSWER: A"
+        return SimpleNamespace(
+            id="resp_test",
+            output=[SimpleNamespace(
+                type="message",
+                content=[SimpleNamespace(type="output_text", text=text)],
+            )],
+            usage={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+        )
+
+    mock = AsyncMock(side_effect=respond)
+    monkeypatch.setattr(llm_client.litellm, "aresponses", mock)
+    return mock
+
+
 class _NoOpGrader(Grader):
     async def grade(self, prompt, samples, model_config, semaphore):
         return GradeResult(score=0.0, n=1)
@@ -21,23 +52,37 @@ class _NoOpGrader(Grader):
     def check_output(self, output, prompt_text=None):
         return None
 @pytest.mark.asyncio
-async def test_call_llm_accepts_system_for_reasoning():
+async def test_call_llm_accepts_system_for_reasoning(responses_api):
     response = await llm_client.call_llm(
         model="openai/gpt-5",
         messages=[{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}],
         is_reasoning=True,
     )
-    assert isinstance(response.output_text, str)
+    assert response.output_text == "ANSWER: A"
+    responses_api.assert_awaited_once()
+    request = responses_api.await_args.kwargs
+    assert request["input"][0] == {
+        "role": "developer", "content": [{"type": "input_text", "text": "sys"}],
+    }
+    assert request["reasoning"] == {"effort": "medium", "summary": "auto"}
+    assert "temperature" not in request
 @pytest.mark.asyncio
-async def test_call_llm_accepts_system_for_non_reasoning():
+async def test_call_llm_accepts_system_for_non_reasoning(responses_api):
     response = await llm_client.call_llm(
         model="openai/gpt-4o",
         messages=[{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}],
         is_reasoning=False,
     )
-    assert isinstance(response.output_text, str)
+    assert response.output_text == "ANSWER: A"
+    responses_api.assert_awaited_once()
+    request = responses_api.await_args.kwargs
+    assert request["input"][0] == {
+        "role": "system", "content": [{"type": "input_text", "text": "sys"}],
+    }
+    assert request["temperature"] == 0.0
+    assert "reasoning" not in request
 @pytest.mark.asyncio
-async def test_call_llm_json_parses_schema():
+async def test_call_llm_json_parses_schema(responses_api):
     parsed, resp = await llm_client.call_llm_json(
         model="openai/gpt-4o",
         messages=[{"role": "user", "content": "Return a JSON object with {\"ok\": true}."}],
@@ -58,8 +103,10 @@ async def test_call_llm_json_parses_schema():
 
     assert parsed["ok"] is True
     assert isinstance(resp.output_text, str)
+    responses_api.assert_awaited_once()
+    assert responses_api.await_args.kwargs["text"]["format"]["name"] == "ok_schema"
 @pytest.mark.asyncio
-async def test_generate_outputs_prompt_sent_contains_all_messages():
+async def test_generate_outputs_prompt_sent_contains_all_messages(responses_api):
     from prefpo.generate import generate_outputs
 
     p = Prompt(value="You are helpful.", role=PromptRole.SYSTEM)
@@ -74,6 +121,11 @@ async def test_generate_outputs_prompt_sent_contains_all_messages():
 
     assert "[system] You are helpful." in out[0].prompt_sent
     assert "[user] What is 2+2?" in out[0].prompt_sent
+    assert out[0].response == "ANSWER: A"
+    responses_api.assert_awaited_once()
+    assert [message["role"] for message in responses_api.await_args.kwargs["input"]] == [
+        "system", "user",
+    ]
 def test_build_standalone_trajectory_passes_prompt_text():
     class _Grader:
         def check_output(self, output, prompt_text=None):
@@ -124,14 +176,11 @@ async def test_optimize_standalone_requires_check_output(tmp_path):
     with pytest.raises(ValueError, match="check_output"):
         await optimize_async(config, grader=_NoOpGrader())
 @pytest.mark.asyncio
-async def test_optimize_writes_multi_trial_summary(tmp_path):
-    train, val, test = load_bbh(
-        "disambiguation_qa",
-        train_size=1,
-        val_size=1,
-        test_size=1,
-        seed=42,
-    )
+async def test_optimize_writes_multi_trial_summary(tmp_path, responses_api):
+    train, val, test = [
+        [Sample(index=i, question=f"Choose a letter for example {i}.", target="A")]
+        for i in range(3)
+    ]
     grader = get_bbh_grader("disambiguation_qa")
     config = PrefPOConfig(
         mode="instruction",
@@ -146,3 +195,6 @@ async def test_optimize_writes_multi_trial_summary(tmp_path):
     assert len(summaries) == 1
     data = json.loads(summaries[0].read_text())
     assert data["n_trials"] == 2
+    assert len(data["trials"]) == 2
+    assert len({trial["run_id"] for trial in data["trials"]}) == 2
+    assert responses_api.await_count > 0

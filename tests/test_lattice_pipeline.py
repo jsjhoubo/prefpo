@@ -395,6 +395,107 @@ async def test_runner_loads_unlabeled_deployment_fixture_and_runs_improvement(tm
     assert result.run_id
 
 
+@pytest.mark.parametrize(
+    ("first_partition", "second_partition"),
+    [
+        ("train", "validation"),
+        ("train", "deployment"),
+        ("train", "test"),
+        ("validation", "deployment"),
+        ("validation", "test"),
+        ("deployment", "test"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_runner_rejects_ids_reused_across_dataset_partitions(
+    tmp_path, first_partition, second_partition
+):
+    records = {
+        "train": _labeled("train-id", "A training example.", "benign", "general"),
+        "validation": _labeled(
+            "validation-id", "A validation example.", "benign", "general"
+        ),
+        "deployment": Conversation(
+            "deployment-id", (ConversationTurn("user", "A deployment example.", 0),)
+        ),
+        "test": _labeled("test-id", "A test example.", "benign", "general"),
+    }
+    records[second_partition] = records[first_partition]
+    config = ExperimentConfig(name="duplicate-partition-id", output_dir=str(tmp_path))
+
+    with pytest.raises(ValueError, match="appears in both"):
+        await LatticeExperiment(config).run(
+            train=[records["train"]],
+            validation=[records["validation"]],
+            deployment=[records["deployment"]],
+            test=[records["test"]],
+        )
+
+
+@pytest.mark.parametrize("id_key", ["id", "conversation_id"])
+@pytest.mark.parametrize("deployment", [False, True])
+def test_runner_rejects_explicit_ids_across_dataset_files(tmp_path, id_key, deployment):
+    paths = []
+    for name in ("train", "validation", "deployment"):
+        path = tmp_path / f"{name}.json"
+        row = {id_key: "shared" if name != "validation" or not deployment else "validation",
+               "text": f"Distinct {name} example", "label": "benign"}
+        path.write_text(json.dumps([row]), encoding="utf-8")
+        paths.append(str(path))
+    config = ExperimentConfig(name="explicit-overlap", output_dir=str(tmp_path))
+    config.dataset.format = "json"
+    config.dataset.train_path, config.dataset.validation_path = paths[:2]
+    if deployment:
+        config.dataset.deployment_path = paths[2]
+    with pytest.raises(ValueError, match="appears in both"):
+        LatticeExperiment(config)._resolve_data(None, None, None, None)
+
+
+@pytest.mark.parametrize("stable_ids", [False, True])
+def test_runner_allows_generated_row_index_ids_across_dataset_files(tmp_path, stable_ids):
+    paths = []
+    for name in ("train", "validation", "deployment"):
+        path = tmp_path / f"{name}.json"
+        row = {"text": f"Distinct {name} example", "domain": "social"}
+        if stable_ids:
+            row["id"] = f"{name}-stable"
+        if name != "deployment":
+            row["label"] = "benign"
+        path.write_text(json.dumps([row]), encoding="utf-8")
+        paths.append(str(path))
+    config = ExperimentConfig(name="generated-ids", output_dir=str(tmp_path))
+    config.dataset.format = "json"
+    (config.dataset.train_path, config.dataset.validation_path,
+     config.dataset.deployment_path) = paths
+    training, validation, deployment, _ = LatticeExperiment(config)._resolve_data(
+        None, None, None, None
+    )
+    ids = [partition[0].conversation_id for partition in (training, validation, deployment)]
+    assert len(set(ids)) == 3
+    if stable_ids:
+        assert ids == ["train-stable", "validation-stable", "deployment-stable"]
+    else:
+        assert all(case_id.endswith("#row=0") for case_id in ids)
+    assert load_conversations(paths[0])[0].conversation_id == ids[0]
+    config.dataset.validation_path = paths[0]
+    with pytest.raises(ValueError, match="appears in both"):
+        LatticeExperiment(config)._resolve_data(None, None, None, None)
+
+
+def test_runner_allows_independent_same_domain_train_and_validation(tmp_path):
+    experiment = LatticeExperiment(
+        ExperimentConfig(name="same-domain-splits", output_dir=str(tmp_path))
+    )
+    training, validation, _, _ = experiment._resolve_data(
+        [_labeled("train-social", "A training example.", "benign", "general")],
+        [_labeled("validation-social", "A validation example.", "harmful", "violence")],
+        None,
+        None,
+    )
+
+    assert training[0].domain == validation[0].domain == "social"
+
+
 def test_research_dataset_files_are_valid_and_have_domain_coverage():
     construction = load_conversations("research_data/construction.jsonl")
     validation = load_conversations("research_data/validation.jsonl")
